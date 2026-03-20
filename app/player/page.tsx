@@ -3,14 +3,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import AppShell from "../../components/AppShell";
+import { supabase } from "../../lib/supabase";
 
-type Tab = "ranking" | "etapas" | "financeiro" | "blinds";
+type Tab = "jogadores" | "ranking" | "blinds";
 
 type Player = {
   id: string;
   nome: string;
   apelido: string;
-  pix: string;
+  pix: string | null;
 };
 
 type BlindLevel = {
@@ -26,59 +27,13 @@ type BlindProfile = {
   niveis: BlindLevel[];
 };
 
-type StageEntry = {
-  playerId: string;
-  present: boolean;
-  buyIn: number;
-  rebuys: number;
-  rebuyValue: number;
-  addon: boolean;
-  addonValue: number;
-  drink: boolean;
-  food: boolean;
-  position: number | null;
-};
-
-type StagePayout = {
-  first: number;
-  second: number;
-  third: number;
-  fourth: number;
-  extra: number;
-};
-
-type Stage = {
-  id: string;
-  nome: string;
-  data: string;
-  notes: string;
-  drinkCost: number;
-  foodCost: number;
-  adminFee: number;
-  blindProfileId: string;
-  isClosed: boolean;
-  payouts: StagePayout;
-  entries: StageEntry[];
-};
-
-const POINTS_TABLE = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1];
-
-function money(value: number) {
-  return value.toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
-}
-
 export default function PlayerPage() {
   const router = useRouter();
 
   const [tab, setTab] = useState<Tab>("ranking");
   const [players, setPlayers] = useState<Player[]>([]);
-  const [stages, setStages] = useState<Stage[]>([]);
+  const [loadingPlayers, setLoadingPlayers] = useState(true);
   const [blindProfiles, setBlindProfiles] = useState<BlindProfile[]>([]);
-  const [selectedStageId, setSelectedStageId] = useState("");
-  const [selectedBlindProfileId, setSelectedBlindProfileId] = useState("");
 
   useEffect(() => {
     const mode = localStorage.getItem("poker_access_mode");
@@ -88,489 +43,226 @@ export default function PlayerPage() {
       return;
     }
 
-    const savedPlayers = localStorage.getItem("poker_players");
-    const savedStages = localStorage.getItem("poker_stages");
-    const savedBlinds = localStorage.getItem("poker_blind_profiles");
+    loadPlayers();
 
-    if (savedPlayers) {
-      setPlayers(JSON.parse(savedPlayers));
-    }
-
-    if (savedStages) {
-      const parsedStages: Stage[] = JSON.parse(savedStages);
-      setStages(parsedStages);
-      if (parsedStages.length > 0) {
-        setSelectedStageId(parsedStages[0].id);
-      }
-    }
-
-    if (savedBlinds) {
-      const parsedBlinds: BlindProfile[] = JSON.parse(savedBlinds);
-      setBlindProfiles(parsedBlinds);
-      if (parsedBlinds.length > 0) {
-        setSelectedBlindProfileId(parsedBlinds[0].id);
-      }
+    const savedProfiles = localStorage.getItem("poker_blind_profiles");
+    if (savedProfiles) {
+      setBlindProfiles(JSON.parse(savedProfiles));
     }
   }, [router]);
+
+  async function loadPlayers() {
+    setLoadingPlayers(true);
+
+    const { data, error } = await supabase
+      .from("players")
+      .select("id, nome, apelido, pix, created_at")
+      .order("created_at", { ascending: true });
+
+    if (error) {
+      console.error("Erro ao buscar jogadores:", error);
+      setLoadingPlayers(false);
+      return;
+    }
+
+    setPlayers(data || []);
+    setLoadingPlayers(false);
+  }
 
   function handleLogout() {
     localStorage.removeItem("poker_access_mode");
     router.push("/");
   }
 
-  const selectedStage = useMemo(
-    () => stages.find((stage) => stage.id === selectedStageId) || null,
-    [stages, selectedStageId]
-  );
+  const sortedPlayers = useMemo(() => {
+    return [...players].sort((a, b) => a.apelido.localeCompare(b.apelido));
+  }, [players]);
 
-  const selectedBlindProfile = useMemo(
-    () =>
-      blindProfiles.find((profile) => profile.id === selectedBlindProfileId) || null,
-    [blindProfiles, selectedBlindProfileId]
-  );
-
-  const ranking = useMemo(() => {
-    return players
-      .map((player) => {
-        let pontos = 0;
-        let primeiro = 0;
-        let segundo = 0;
-        let terceiro = 0;
-        let presencas = 0;
-
-        stages.forEach((stage) => {
-          const entry = stage.entries.find((e) => e.playerId === player.id);
-          if (!entry) return;
-
-          if (entry.present) presencas += 1;
-          if (entry.position && entry.position >= 1 && entry.position <= 10) {
-            pontos += POINTS_TABLE[entry.position - 1] || 0;
-          }
-          if (entry.position === 1) primeiro += 1;
-          if (entry.position === 2) segundo += 1;
-          if (entry.position === 3) terceiro += 1;
-        });
-
-        return {
-          ...player,
-          pontos,
-          primeiro,
-          segundo,
-          terceiro,
-          presencas,
-        };
-      })
-      .sort((a, b) => {
-        if (b.pontos !== a.pontos) return b.pontos - a.pontos;
-        if (b.primeiro !== a.primeiro) return b.primeiro - a.primeiro;
-        if (b.segundo !== a.segundo) return b.segundo - a.segundo;
-        if (b.terceiro !== a.terceiro) return b.terceiro - a.terceiro;
-        return a.apelido.localeCompare(b.apelido);
-      });
-  }, [players, stages]);
-
-  const selectedStageFinance = useMemo(() => {
-    if (!selectedStage) {
-      return {
-        pokerTotal: 0,
-        drinkParticipants: 0,
-        foodParticipants: 0,
-        drinkShare: 0,
-        foodShare: 0,
-        prizeBase: 0,
-        payoutConfigured: 0,
-        payoutDifference: 0,
-      };
-    }
-
-    const pokerTotal = selectedStage.entries.reduce((sum, entry) => {
-      if (!entry.present) return sum;
-      return (
-        sum +
-        Number(entry.buyIn || 0) +
-        Number(entry.rebuys || 0) * Number(entry.rebuyValue || 0) +
-        (entry.addon ? Number(entry.addonValue || 0) : 0)
-      );
-    }, 0);
-
-    const drinkParticipants = selectedStage.entries.filter((e) => e.drink).length;
-    const foodParticipants = selectedStage.entries.filter((e) => e.food).length;
-
-    const drinkShare =
-      drinkParticipants > 0
-        ? Number(selectedStage.drinkCost || 0) / drinkParticipants
-        : 0;
-
-    const foodShare =
-      foodParticipants > 0
-        ? Number(selectedStage.foodCost || 0) / foodParticipants
-        : 0;
-
-    const prizeBase = pokerTotal - Number(selectedStage.adminFee || 0);
-
-    const payoutConfigured =
-      Number(selectedStage.payouts.first || 0) +
-      Number(selectedStage.payouts.second || 0) +
-      Number(selectedStage.payouts.third || 0) +
-      Number(selectedStage.payouts.fourth || 0) +
-      Number(selectedStage.payouts.extra || 0);
-
-    const payoutDifference = prizeBase - payoutConfigured;
-
-    return {
-      pokerTotal,
-      drinkParticipants,
-      foodParticipants,
-      drinkShare,
-      foodShare,
-      prizeBase,
-      payoutConfigured,
-      payoutDifference,
-    };
-  }, [selectedStage]);
+  const tabs: { key: Tab; label: string }[] = [
+    { key: "ranking", label: "Ranking" },
+    { key: "jogadores", label: "Jogadores" },
+    { key: "blinds", label: "Blinds" },
+  ];
 
   return (
     <AppShell role="player" onLogout={handleLogout}>
       <div className="space-y-6">
-        <div className="grid grid-cols-4 gap-2 rounded-2xl border border-red-900 bg-black/60 p-2">
-          {[
-            { key: "ranking", label: "Ranking" },
-            { key: "etapas", label: "Etapas" },
-            { key: "financeiro", label: "Financeiro" },
-            { key: "blinds", label: "Blinds" },
-          ].map((item) => (
-            <button
-              key={item.key}
-              onClick={() => setTab(item.key as Tab)}
-              className={`rounded-xl px-4 py-3 font-semibold transition ${
-                tab === item.key
-                  ? "bg-red-700 text-white"
-                  : "bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-white"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
+        <div className="overflow-x-auto">
+          <div className="flex min-w-max gap-2 rounded-2xl border border-red-900 bg-black/60 p-2">
+            {tabs.map((item) => (
+              <button
+                key={item.key}
+                onClick={() => setTab(item.key)}
+                className={`rounded-xl px-4 py-3 text-sm font-semibold transition sm:px-5 ${
+                  tab === item.key
+                    ? "bg-red-700 text-white"
+                    : "bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-white"
+                }`}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         {tab === "ranking" && (
-          <div className="rounded-[28px] border border-red-800 bg-black/80 p-6 shadow-2xl">
-            <h2 className="text-2xl font-bold text-white">Ranking geral</h2>
+          <div className="space-y-6">
+            <div className="rounded-[28px] border border-red-800 bg-black/80 p-5 shadow-2xl sm:p-6">
+              <h2 className="text-2xl font-bold text-white">Ranking geral</h2>
+              <p className="mt-2 text-sm text-zinc-400 sm:text-base">
+                Base visual responsiva pronta. A pontuação online entra na próxima
+                fase.
+              </p>
+            </div>
 
-            <div className="mt-6 overflow-x-auto rounded-2xl border border-red-900">
+            <div className="hidden overflow-hidden rounded-[28px] border border-red-800 bg-black/80 shadow-2xl md:block">
               <table className="min-w-full">
                 <thead className="bg-zinc-950/90">
                   <tr className="text-left text-sm text-zinc-400">
-                    <th className="px-4 py-3">#</th>
-                    <th className="px-4 py-3">Apelido</th>
-                    <th className="px-4 py-3">Pontos</th>
-                    <th className="px-4 py-3">🥇</th>
-                    <th className="px-4 py-3">🥈</th>
-                    <th className="px-4 py-3">🥉</th>
-                    <th className="px-4 py-3">Presenças</th>
+                    <th className="px-4 py-4">#</th>
+                    <th className="px-4 py-4">Jogador</th>
+                    <th className="px-4 py-4">Status</th>
                   </tr>
                 </thead>
-
                 <tbody>
-                  {ranking.map((player, index) => (
+                  {sortedPlayers.map((player, index) => (
                     <tr
                       key={player.id}
                       className="border-t border-red-950 text-sm text-white"
                     >
-                      <td className="px-4 py-3">{index + 1}</td>
-                      <td className="px-4 py-3 font-semibold">{player.apelido}</td>
-                      <td className="px-4 py-3">{player.pontos}</td>
-                      <td className="px-4 py-3">{player.primeiro}</td>
-                      <td className="px-4 py-3">{player.segundo}</td>
-                      <td className="px-4 py-3">{player.terceiro}</td>
-                      <td className="px-4 py-3">{player.presencas}</td>
+                      <td className="px-4 py-4">{index + 1}</td>
+                      <td className="px-4 py-4 font-semibold">{player.apelido}</td>
+                      <td className="px-4 py-4 text-zinc-400">
+                        Base pronta para pontuação online
+                      </td>
                     </tr>
                   ))}
+
+                  {sortedPlayers.length === 0 && !loadingPlayers && (
+                    <tr>
+                      <td colSpan={3} className="px-4 py-6 text-center text-zinc-500">
+                        Nenhum jogador cadastrado ainda.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>
+
+            <div className="space-y-3 md:hidden">
+              {loadingPlayers && (
+                <div className="rounded-2xl border border-red-900 bg-black/80 p-4 text-zinc-400">
+                  Carregando jogadores...
+                </div>
+              )}
+
+              {!loadingPlayers && sortedPlayers.length === 0 && (
+                <div className="rounded-2xl border border-red-900 bg-black/80 p-4 text-zinc-500">
+                  Nenhum jogador cadastrado ainda.
+                </div>
+              )}
+
+              {!loadingPlayers &&
+                sortedPlayers.map((player, index) => (
+                  <div
+                    key={player.id}
+                    className="rounded-2xl border border-red-900 bg-black/80 p-4"
+                  >
+                    <div className="text-xs text-zinc-500">Posição base</div>
+                    <div className="mt-1 text-lg font-bold text-white">
+                      {index + 1}. {player.apelido}
+                    </div>
+                    <div className="mt-1 text-sm text-zinc-400">
+                      Base pronta para pontuação online
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
         )}
 
-        {tab === "etapas" && (
-          <div className="rounded-[28px] border border-red-800 bg-black/80 p-6 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold text-white">Resultados das etapas</h2>
-
-              <select
-                value={selectedStageId}
-                onChange={(e) => setSelectedStageId(e.target.value)}
-                className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-white"
-              >
-                <option value="">Selecione a etapa</option>
-                {stages.map((stage) => (
-                  <option key={stage.id} value={stage.id}>
-                    {stage.nome} - {stage.data}
-                  </option>
-                ))}
-              </select>
+        {tab === "jogadores" && (
+          <div className="rounded-[28px] border border-red-800 bg-black/80 p-5 shadow-2xl sm:p-6">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-2xl font-bold text-white">Jogadores</h2>
+              <span className="rounded-full border border-red-900 px-3 py-1 text-xs text-zinc-300">
+                {players.length} total
+              </span>
             </div>
 
-            {!selectedStage && (
-              <p className="mt-6 text-zinc-500">Selecione uma etapa para visualizar.</p>
-            )}
+            <div className="mt-6 space-y-3">
+              {loadingPlayers && (
+                <p className="text-zinc-400">Carregando jogadores...</p>
+              )}
 
-            {selectedStage && (
-              <div className="mt-6 space-y-6">
-                <div className="rounded-2xl border border-red-900 bg-zinc-950/60 p-5">
-                  <div className="text-xl font-bold text-red-400">{selectedStage.nome}</div>
-                  <div className="mt-1 text-sm text-zinc-500">{selectedStage.data}</div>
-                  {selectedStage.notes && (
-                    <div className="mt-3 text-sm text-zinc-400">
-                      Observações: {selectedStage.notes}
+              {!loadingPlayers && sortedPlayers.length === 0 && (
+                <p className="text-zinc-400">Nenhum jogador cadastrado ainda.</p>
+              )}
+
+              {!loadingPlayers &&
+                sortedPlayers.map((player) => (
+                  <div
+                    key={player.id}
+                    className="rounded-2xl border border-red-900 bg-zinc-950/60 p-4"
+                  >
+                    <div className="text-lg font-bold text-white">
+                      {player.apelido}
                     </div>
-                  )}
-                </div>
-
-                <div className="overflow-x-auto rounded-2xl border border-red-900">
-                  <table className="min-w-full">
-                    <thead className="bg-zinc-950/90">
-                      <tr className="text-left text-sm text-zinc-400">
-                        <th className="px-4 py-3">Posição</th>
-                        <th className="px-4 py-3">Jogador</th>
-                        <th className="px-4 py-3">Buy-in</th>
-                        <th className="px-4 py-3">Rebuys</th>
-                        <th className="px-4 py-3">Add-on</th>
-                        <th className="px-4 py-3">Bebida</th>
-                        <th className="px-4 py-3">Comida</th>
-                      </tr>
-                    </thead>
-
-                    <tbody>
-                      {[...selectedStage.entries]
-                        .filter((entry) => entry.present)
-                        .sort((a, b) => {
-                          const posA = a.position ?? 999;
-                          const posB = b.position ?? 999;
-                          return posA - posB;
-                        })
-                        .map((entry) => {
-                          const player = players.find((p) => p.id === entry.playerId);
-                          if (!player) return null;
-
-                          return (
-                            <tr
-                              key={entry.playerId}
-                              className="border-t border-red-950 text-sm text-white"
-                            >
-                              <td className="px-4 py-3">{entry.position ?? "-"}</td>
-                              <td className="px-4 py-3 font-semibold">{player.apelido}</td>
-                              <td className="px-4 py-3">{money(entry.buyIn)}</td>
-                              <td className="px-4 py-3">
-                                {entry.rebuys} × {money(entry.rebuyValue)}
-                              </td>
-                              <td className="px-4 py-3">
-                                {entry.addon ? money(entry.addonValue) : "-"}
-                              </td>
-                              <td className="px-4 py-3">{entry.drink ? "Sim" : "-"}</td>
-                              <td className="px-4 py-3">{entry.food ? "Sim" : "-"}</td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === "financeiro" && (
-          <div className="rounded-[28px] border border-red-800 bg-black/80 p-6 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold text-white">Financeiro e premiação</h2>
-
-              <select
-                value={selectedStageId}
-                onChange={(e) => setSelectedStageId(e.target.value)}
-                className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-white"
-              >
-                <option value="">Selecione a etapa</option>
-                {stages.map((stage) => (
-                  <option key={stage.id} value={stage.id}>
-                    {stage.nome} - {stage.data}
-                  </option>
+                    <div className="text-sm text-zinc-400">{player.nome}</div>
+                    {player.pix && (
+                      <div className="mt-1 text-sm text-zinc-500">
+                        PIX: {player.pix}
+                      </div>
+                    )}
+                  </div>
                 ))}
-              </select>
             </div>
-
-            {!selectedStage && (
-              <p className="mt-6 text-zinc-500">Selecione uma etapa para visualizar.</p>
-            )}
-
-            {selectedStage && (
-              <div className="mt-6 space-y-6">
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <div className="rounded-2xl border border-red-900 bg-zinc-950/60 p-6">
-                    <h3 className="text-2xl font-bold text-white">Resumo do poker</h3>
-
-                    <div className="mt-6 space-y-4">
-                      <div className="flex items-center justify-between rounded-xl bg-red-950/40 px-4 py-4">
-                        <span>Total do poker</span>
-                        <strong>{money(selectedStageFinance.pokerTotal)}</strong>
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-xl bg-red-950/40 px-4 py-4">
-                        <span>Taxa administrativa</span>
-                        <strong>{money(Number(selectedStage.adminFee || 0))}</strong>
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-xl bg-red-950/40 px-4 py-4">
-                        <span>Base da premiação</span>
-                        <strong>{money(selectedStageFinance.prizeBase)}</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-red-900 bg-zinc-950/60 p-6">
-                    <h3 className="text-2xl font-bold text-white">Confraternização</h3>
-
-                    <div className="mt-6 space-y-4">
-                      <div className="flex items-center justify-between rounded-xl bg-red-950/40 px-4 py-4">
-                        <span>Bebida</span>
-                        <strong>{money(Number(selectedStage.drinkCost || 0))}</strong>
-                      </div>
-                      <div className="text-sm text-zinc-400">
-                        {selectedStageFinance.drinkParticipants} participantes ·{" "}
-                        {money(selectedStageFinance.drinkShare)} por pessoa
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-xl bg-red-950/40 px-4 py-4">
-                        <span>Comida</span>
-                        <strong>{money(Number(selectedStage.foodCost || 0))}</strong>
-                      </div>
-                      <div className="text-sm text-zinc-400">
-                        {selectedStageFinance.foodParticipants} participantes ·{" "}
-                        {money(selectedStageFinance.foodShare)} por pessoa
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-red-900 bg-zinc-950/60 p-6">
-                  <h3 className="text-2xl font-bold text-white">Premiação configurada</h3>
-
-                  <div className="mt-6 grid gap-4 md:grid-cols-3">
-                    <div className="rounded-xl bg-red-950/40 px-4 py-4">
-                      <div className="text-sm text-zinc-300">1º lugar</div>
-                      <div className="mt-2 text-xl font-bold text-white">
-                        {money(selectedStage.payouts.first)}
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl bg-red-950/40 px-4 py-4">
-                      <div className="text-sm text-zinc-300">2º lugar</div>
-                      <div className="mt-2 text-xl font-bold text-white">
-                        {money(selectedStage.payouts.second)}
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl bg-red-950/40 px-4 py-4">
-                      <div className="text-sm text-zinc-300">3º lugar</div>
-                      <div className="mt-2 text-xl font-bold text-white">
-                        {money(selectedStage.payouts.third)}
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl bg-red-950/40 px-4 py-4">
-                      <div className="text-sm text-zinc-300">4º lugar</div>
-                      <div className="mt-2 text-xl font-bold text-white">
-                        {money(selectedStage.payouts.fourth)}
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl bg-red-950/40 px-4 py-4">
-                      <div className="text-sm text-zinc-300">Extra / acordo</div>
-                      <div className="mt-2 text-xl font-bold text-white">
-                        {money(selectedStage.payouts.extra)}
-                      </div>
-                    </div>
-
-                    <div className="rounded-xl bg-red-950/40 px-4 py-4">
-                      <div className="text-sm text-zinc-300">Diferença</div>
-                      <div
-                        className={`mt-2 text-xl font-bold ${
-                          selectedStageFinance.payoutDifference === 0
-                            ? "text-green-400"
-                            : "text-yellow-300"
-                        }`}
-                      >
-                        {money(selectedStageFinance.payoutDifference)}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
         {tab === "blinds" && (
-          <div className="rounded-[28px] border border-red-800 bg-black/80 p-6 shadow-2xl">
-            <div className="flex items-center justify-between">
+          <div className="space-y-6">
+            <div className="rounded-[28px] border border-red-800 bg-black/80 p-5 shadow-2xl sm:p-6">
               <h2 className="text-2xl font-bold text-white">Estruturas de blind</h2>
-
-              <select
-                value={selectedBlindProfileId}
-                onChange={(e) => setSelectedBlindProfileId(e.target.value)}
-                className="rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 text-white"
-              >
-                <option value="">Selecione a estrutura</option>
-                {blindProfiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.nome}
-                  </option>
-                ))}
-              </select>
+              <p className="mt-2 text-sm text-zinc-400 sm:text-base">
+                Base visual responsiva pronta. As estruturas ainda serão migradas para
+                o banco na próxima etapa.
+              </p>
             </div>
 
-            {!selectedBlindProfile && (
-              <p className="mt-6 text-zinc-500">
-                Selecione uma estrutura para visualizar.
-              </p>
-            )}
+            <div className="space-y-4">
+              {blindProfiles.length === 0 && (
+                <div className="rounded-2xl border border-red-900 bg-black/80 p-4 text-zinc-500">
+                  Nenhuma estrutura disponível neste dispositivo ainda.
+                </div>
+              )}
 
-            {selectedBlindProfile && (
-              <div className="mt-6 space-y-6">
-                <div className="rounded-2xl border border-red-900 bg-zinc-950/60 p-5">
-                  <div className="text-xl font-bold text-red-400">
-                    {selectedBlindProfile.nome}
-                  </div>
+              {blindProfiles.map((profile) => (
+                <div
+                  key={profile.id}
+                  className="rounded-2xl border border-red-900 bg-black/80 p-4"
+                >
+                  <div className="text-lg font-bold text-red-400">{profile.nome}</div>
                   <div className="mt-1 text-sm text-zinc-500">
-                    {selectedBlindProfile.minutos} minutos por nível
+                    {profile.minutos} min por nível
+                  </div>
+
+                  <div className="mt-4 space-y-2">
+                    {profile.niveis.map((level, index) => (
+                      <div
+                        key={level.id}
+                        className="flex items-center justify-between rounded-xl border border-red-950 bg-zinc-950/60 px-4 py-3 text-sm"
+                      >
+                        <span className="text-zinc-300">Nível {index + 1}</span>
+                        <span className="font-semibold text-white">
+                          {level.small} / {level.big}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
-
-                <div className="overflow-x-auto rounded-2xl border border-red-900">
-                  <table className="min-w-full">
-                    <thead className="bg-zinc-950/90">
-                      <tr className="text-left text-sm text-zinc-400">
-                        <th className="px-4 py-3">Nível</th>
-                        <th className="px-4 py-3">Small blind</th>
-                        <th className="px-4 py-3">Big blind</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedBlindProfile.niveis.map((level, index) => (
-                        <tr
-                          key={level.id}
-                          className="border-t border-red-950 text-sm text-white"
-                        >
-                          <td className="px-4 py-3">{index + 1}</td>
-                          <td className="px-4 py-3">{level.small}</td>
-                          <td className="px-4 py-3">{level.big}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
+              ))}
+            </div>
           </div>
         )}
       </div>
